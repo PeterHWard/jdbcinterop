@@ -22,7 +22,7 @@ package object interpolation {
       builder.mkStatement
     }
 
-    def sql[A : TypeTag, B : TypeTag](a: A, b: B): MkStatement = {
+      def sql[A : TypeTag, B : TypeTag](a: A, b: B): MkStatement = {
       val strings = sc.parts.iterator
       val builder = QueryBuilder.empty
 
@@ -642,7 +642,7 @@ package object interpolation {
       builder.mkStatement
     }
 
-    def sql[A : TypeTag, B : TypeTag, C : TypeTag, D : TypeTag, E : TypeTag, F : TypeTag, G : TypeTag, H : TypeTag, I : TypeTag, J : TypeTag, K : TypeTag, L : TypeTag, M : TypeTag, N : TypeTag, O : TypeTag, P : TypeTag, Q : TypeTag, R : TypeTag, S : TypeTag, T : TypeTag, U : TypeTag, V : TypeTag](a: A, b: B, c: C, d: D, e: E, f: F, g: G, h: H, i: I, j: J, k: K, l: L, m: M, n: N, o: O, p: P, q: Q, r: R, s: S, t: T, u: U, v: V): MkStatement = {
+    def sql[A : TypeTag, B : TypeTag, C : TypeTag, D : TypeTag, E : TypeTag, F : TypeTag, G : TypeTag, H : TypeTag, I : TypeTag, J : TypeTag, K : TypeTag, L : TypeTag, M : TypeTag, N : TypeTag, O : TypeTag, P : TypeTag, Q : TypeTag, R : TypeTag, S : TypeTag, T : TypeTag, U : TypeTag, V : TypeTag](a: A, b: B, c: C, d: D, e: E, f: F, g: G, h: H, i: I, j: J, k: K, l: L, m: M, n: N, o: O, p: P, q: Q, r: R, s: S, t: T, u: U, v: V, foo: String): MkStatement = {
       val strings = sc.parts.iterator
       val builder = QueryBuilder.empty
 

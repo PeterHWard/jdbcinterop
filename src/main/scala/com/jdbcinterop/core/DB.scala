@@ -75,48 +75,66 @@ trait ConnectionProvider {
   def withConnection[R](op: Connection => R): R
 }
 
-object DB {}
 
-trait DB {
-  this: ConnectionProvider =>
+trait ExecScope extends ConnectionProvider {
+  protected val isTransaction: Boolean
+  protected val isSession: Boolean
 
-  private def transaction[R](op: ConnWrapper => R): R = withConnection[R](conn0 =>{
+  def withSession[R](op: (Session) => R): R = withConnection(conn=>{
     val self = this
-    val cw = new ConnWrapper {
-      override val conn: Connection = conn0
+    op(new Session {
       override val flavor: DBFlavorTrait = self.flavor
-    }
-    cw.conn.setAutoCommit(false)
-
-    var res: Option[R] = None
-    try {
-      res = Some(op(cw))
-      cw.conn.commit()
-    } finally {
-      cw.conn.close()
-    }
-
-    res.get
+      override def withConnection[R1](op: (Connection) => R1): R1 = op(conn)
+    })
   })
 
+  def withTransaction[R](op: Transaction => R): R = withConnection(conn=>{
+    val self = this
+    op(new Transaction {
+      override val flavor: DBFlavorTrait = self.flavor
+      override def withConnection[R1](op: (Connection) => R1): R1 = op(conn)
+    })
+  })
+
+  protected def execAux[R](op: ConnWrapper => R): R = {
+    withConnection[R](conn0 =>{
+      val self = this
+      val cw = new ConnWrapper {
+        override val conn: Connection = conn0
+        override val flavor: DBFlavorTrait = self.flavor
+      }
+      cw.conn.setAutoCommit(false)
+
+      var res: Option[R] = None
+      try {
+        res = Some(op(cw))
+        if (!isTransaction) cw.conn.commit()
+      } finally {
+        if (!isTransaction && !isSession) cw.conn.close()
+      }
+
+      res.get
+    })
+  }
+
   def raw(sql: String): Boolean = {
-    transaction(conn=>{
+    execAux(conn=>{
       conn.conn.prepareStatement(sql).execute()
     })
   }
 
-  def exec(op: MkStatement): Boolean = transaction(c=>op(c).map(_.preparedStatement.execute())).headOption.getOrElse(false)
+  def exec(op: MkStatement): Boolean = execAux(c=>op(c).map(_.preparedStatement.execute())).headOption.getOrElse(false)
 
   def execUpdate(update: MkStatement): Long = execUpdates(Seq(update))
 
   def execUpdates(updates: Iterable[MkStatement]): Long = {
-    transaction[Long](conn=>{
+    execAux[Long](conn=>{
       updates.flatMap(u=>u(conn).map(_.preparedStatement.executeUpdate())).sum
     })
   }
 
   def execQuery[T](query: MkStatement)(each: RSWrapper => T): Iterable[T] = {
-    transaction[Iterable[T]](conn=>{
+    execAux[Iterable[T]](conn=>{
       query(conn).flatMap(psw=>{
         val rs = psw.preparedStatement.executeQuery()
         val res = scala.collection.mutable.ListBuffer.empty[T]
@@ -130,4 +148,33 @@ trait DB {
       })
     })
   }
+}
+
+
+trait Session extends ExecScope {
+  protected val isTransaction: Boolean = false
+  protected val isSession: Boolean = true
+
+  override def withSession[R](op: (Session) => R): R
+    = throw new IllegalAccessError("Recursive session scopes not allowed")
+}
+
+
+trait Transaction extends ExecScope {
+  protected val isTransaction: Boolean = true
+  protected val isSession: Boolean = true
+
+  override def withTransaction[R](op: (Transaction) => R): R
+    = throw new IllegalAccessError("Recursive transaction scopes not allowed")
+
+  override def withSession[R](op: (Session) => R): R
+    = throw new IllegalAccessError("No transactional session cannot be created from transaction scope")
+}
+
+
+object DB {}
+
+trait DB extends ExecScope {
+  protected val isTransaction: Boolean = false
+  protected val isSession: Boolean = false
 }

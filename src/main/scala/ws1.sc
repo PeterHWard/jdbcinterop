@@ -10,4 +10,22 @@ def targ[T: TypeTag](arg: T): String = {
   typeOf[T].toString
 }
 
-println(">>> " + targ(SQLArray(Seq(""))))
+class Bar
+
+object Foo {
+  def withImplicit(op: Bar => Unit): Unit = {
+    op(new Bar)
+  }
+
+  def takesBar(arg: Any)(implicit bar: Bar): Boolean = true
+
+  def test(): Unit = {
+    withImplicit(implicit bar=>{
+      takesBar("ignored")
+    })
+  }
+}
+
+Foo.test()
+
+println(">> " + targ(SQLArray(Seq(""))))

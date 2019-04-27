@@ -1,32 +1,36 @@
-JDBC Interop
+# JDBC Interop
 
 A small library designed to smooth over some of the rough edges when working with JDBC from Scala.
 
+# Warning
+This library is not stable nor thoroughly tested. Do not use in production. 
+
 # Quickstart Example
-scala```
-  import com.jdbcinterop.db.{DB, DBFlavor}
-  import com.jdbcinterop.dsl._
+```scala
+import com.jdbcinterop.db.{DB, DBFlavor}
+import com.jdbcinterop.dsl._
 
-  val db = new DB {
-    override val flavor: DBFlavorTrait = DBFlavor.H2
-    override def withConnection[R](op: Connection => R): R = {
-      val conn = DriverManager.getConnection("jdbc:h2:mem:test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1")
-      op(conn)
-    }
+val db = new DB {
+  override val flavor: DBFlavorTrait = DBFlavor.H2
+  override def withConnection[R](op: Connection => R): R = {
+    val conn = DriverManager.getConnection("jdbc:h2:mem:test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1")
+    op(conn)
   }
+}
 
-  val firstName = "GINA"
-  val lastName = "DEGENERES"
+val firstName = "GINA"
+val lastName = "DEGENERES"
 
-  val query = sql"""SELECT count(*) films
-                    FROM actor AS a
-                    JOIN film_actor AS fa USING (actor_id)
-                    GROUP BY actor_id, first_name, last_name
-                    WHERE first_name = $firstName
-                    AND last_name = $lastName"""
+val query = sql"""SELECT count(*) films
+                  FROM actor AS a
+                  JOIN film_actor AS fa USING (actor_id)
+                  GROUP BY actor_id, first_name, last_name
+                  WHERE first_name = $firstName
+                  AND last_name = $lastName"""
 
-  val result = db.executeQuery(query)(_.getInt).head // 42
+val result = db.executeQuery(query)(_.getInt).head // 42
 ```
+
 
 # What This is Not
 JDBC Interop is not an ORM or functional abstraction for working with RDBMS. If that is what you are looking for consider:
@@ -36,46 +40,91 @@ JDBC Interop is not an ORM or functional abstraction for working with RDBMS. If 
 - [ScalikeJDBC](http://scalikejdbc.org/)
 - [Slick](http://slick.lightbend.com/)
 
-It is not a parser or code generator. It simply provides sugar for producing prepared statements. If you wich to compose
+It is not a parser or code generator. It simply provides sugar for producing prepared statements. If you wish to compose
 SQL programmatically consider Quill.
+
 
 # TODO
 - DB API
 
-# Interpolation DSL
-JDBC Interop's key feature. Allows variables to be placed directly in queries and hopefully "does the right thing".
 
-scala```
-  val db: DB = ...
-  val name = "Eve"
-  val query = sql"SELECT * FROM users WHERE first_name = $name"
-  db.executeQuery(query)(rsw=> /* code to map over result set here */) ...
+# Interpolation DSL
+JDBC Interop's key feature. Allows variables to be placed directly in SQL string and hopefully "does the right thing".
+
+```scala
+val db: DB = ...
+val name = "Eve"
+val query = sql"SELECT * FROM users WHERE first_name = $name"
+db.executeQuery(query)(rsw=> /* code to map over result set here */) ...
 ```
 
 This might look scary, but note the `sql` prefix. `query` is not a string but a special function that gets consumed by
-one of `DB`'s exec methods `executeQuery()`` in this example. Under the hood something like this is happening:
+one of `DB`'s exec methods - `executeQuery()`` in this example. Under the hood something like this is happening:
 
-scala```
-  val conn: java.sql.Connection = ...
-  val ps = conn.prepare("SELECT * FROM users WHERE first_name = ?")   // the variable `name` is replaced with `?`
-  ps.setString(1, name)                                               // we safely pass the value of `name` here
+```scala
+val conn: java.sql.Connection = ...
+val ps = conn.prepare("SELECT * FROM users WHERE first_name = ?")   // the variable `name` is replaced with `?`
+ps.setString(1, name)                                               // we safely pass the value of `name` here
 ```
 
 ## SQL Injection
-JDBC Interop uses JDBC prepared statements of generate queries. The `sql` string interpolation is doing more than naive
-variable/text substition. Varaibles passed to the `sql` interpolation method are either converted to a single ? or, in the
-case of tuples, used to produce list constants - also properly ?-paremeterized.
+JDBC Interop uses JDBC prepared statements of generate queries. The `sql` string interpolator  is doing more than naive
+variable/text substition. Variables passed to `sql` interpolator methods are either converted to a single ? or in the
+case of tuples and lists used to produce tuple/list constants - also properly ?-paremeterized.
 
 For cases where direct string interpolation is required, JDBC Interop offers special unsafe methods and classes whose
 names start with UNSAFE. These *do* insert text directly into the query string and are subject to SQL injection.
 
+**Note:** Because JDBC Interop adds a layer of indirection on top of the JDBC API there is always a (small) risk that JDBC 
+Interop will introduce vulnerabilities that don't exist in JDBC. 
+
+### Eample - Single Value
+```scala 
+sql"UPDATE foo SET bar = ${42}"
+```
+
+Effectively becomes:
+
+```scala
+val ps = conn.prepare("UPDATE foo SET bar = ?")   
+ps.setInt(1, 42)  
+```
+
+### Eample - Tuple
+```scala 
+sql"INSERT INTO foo VALUES ${(1, "bar")}"
+```
+
+Effectively becomes:
+
+```scala
+val ps = conn.prepare("INSERT INTO foo VALUES (?, ?)")  
+ps.setInt(1, 1)
+ps.setString(2, "bar")  
+```
+
+### Eample - List
+```scala 
+sql"SELECT * FROM foo WHERE id IN ${list(Seq(1,2,3,...)}"
+```
+
+Effectively becomes:
+
+```scala
+val ps = conn.prepare("ISELECT * FROM foo WHERE id IN (?,?,?,...)")  
+ps.setInt(1, 1)
+ps.setInt(2, 2)
+ps.setInt(3, 3)
+...
+```
+
 ## Lists and Arrays
 Tuples as well as the DSL's `SQLList[A]`` class are converted to SQL list constants. The following
 
-scala```
-  sql"SELECT * FROM foo WHERE id IN ($1,$2,$3)"
-  sql"SELECT * FROM foo WHERE id IN ${(1,2,3)}"
-  sql"SELECT * FROM foo WHERE id IN ${SQLList(Seq(1,2,3), false)}" // SQLList configuration explained below
+```scala
+sql"SELECT * FROM foo WHERE id IN ($1,$2,$3)"
+sql"SELECT * FROM foo WHERE id IN ${(1,2,3)}"
+sql"SELECT * FROM foo WHERE id IN ${SQLList(Seq(1,2,3), false)}" // SQLList configuration explained below
 ```
 
 all translate to:
@@ -85,21 +134,21 @@ sql```SELECT * FROM foo WHERE id IN (?,?,?)```
 ### open
 An "open" list can be created with
 
-scala```
-  INSERT INTO foo (id, flag) VALUES ${open(
-    (1, "a"),
-    (2, "b"),
-    (3, "c")
-  )}
+```scala
+INSERT INTO foo (id, flag) VALUES ${open(
+  (1, "a"),
+  (2, "b"),
+  (3, "c")
+)}
 ```
 
 this generates:
 
 sql```
-  INSERT INTO foo (id, flag) VALUES
-    (?, ?),
-    (?, ?),
-    (?, ?)
+INSERT INTO foo (id, flag) VALUES
+  (?, ?),
+  (?, ?),
+  (?, ?)
 ```
 
 The ability to produce constants from arbitrarily long lists is probably JDBC Interop's most useful feature.
@@ -111,38 +160,38 @@ JDBC Interop dynamically creates list constants with `?`s for each item, then se
 
 The user code:
 
-scala```
-    val activeStatus = false
-    val flags = Seq(("a","b","c","b","e"))
+```scala
+val activeStatus = false
+val flags = Seq(("a","b","c","b","e"))
 
-    val query = sql"""
-        SELECT * FROM foo WHERE flag IN ${SQLList(flags, abortIfEmpty=true)}
-        AND active = ${activeStatus}"""
+val query = sql"""
+    SELECT * FROM foo WHERE flag IN ${SQLList(flags, abortIfEmpty=true)}
+    AND active = ${activeStatus}"""
 ```
 
 effectively becomes:
 
-scala```
-    val ps: PrepatedStatement = conn.prepare("SELECT * FROM foo WHERE id IN (?,?,?,?.?)\nAND active = ?")
-    ps.setString(1, "a")
-    ps.setString(2, "b")
-    ps.setString(3, "c")
-    ps.setString(4, "d")
-    ps.setString(5, "e")
-    ps.setBoolean(6, false)
+```scala
+val ps: PrepatedStatement = conn.prepare("SELECT * FROM foo WHERE id IN (?,?,?,?.?)\nAND active = ?")
+ps.setString(1, "a")
+ps.setString(2, "b")
+ps.setString(3, "c")
+ps.setString(4, "d")
+ps.setString(5, "e")
+ps.setBoolean(6, false)
 ```
 
 ### SQLList[A] Class
 Instead of passing a tuple the `SQLList[A]` case class can be instantiated directly. This affords several config options:
 
-scala```
-  SQLList[A](
-    values: Seq[A]                  // the source seq, required
-    abortIfEmpty: Boolean,          // See [target]
-    open: Boolean = false,          // if true enclosing parens omitted
-    maxLength: Option[Int] = None   // See [target]
-    autoChunk: Boolean = false      // See [target]
-  )
+```scala
+SQLList[A](
+  values: Seq[A]                  // the source seq, required
+  abortIfEmpty: Boolean,          // See [target]
+  open: Boolean = false,          // if true enclosing parens omitted
+  maxLength: Option[Int] = None   // See [target]
+  autoChunk: Boolean = false      // See [target]
+)
 ```
 
 ### Empty List Handling
@@ -173,13 +222,13 @@ Because of the way variables are passed through `StringContext`, I was unable to
 Therefore sequences types are not automatically treated as arrays. An intance of SQLArray[A], which reliably obtains the type of
 type argument A, is required. To define via the DSL use use the `array()` method:
 
-scala```
-  UPDATE foo SET arr = ${array("X", "Y", "Z") WHERE ...} // ensures an array of the correct type is created (`text[]` for PostgreSQL)
+```scala
+UPDATE foo SET arr = ${array("X", "Y", "Z") WHERE ...} // ensures an array of the correct type is created (`text[]` for PostgreSQL)
  ```
 
 If you wish to create an array from a sequence type use the SQLArray[A] class.
 
-scala```val arr = SQLArray(Seq("a","b","c"))```
+```scalaval arr = SQLArray(Seq("a","b","c"))```
 
 ## UNSAFE Methods and Classes
 The DSL offers an escape hatch where regular string interpolation needs to be achived. These methods and classes are "unsafe".
@@ -189,9 +238,9 @@ as this create an SQL injection vector.
 ### UNSAFE_direct
 The UNSAFE_direct DSL method allows a variable to be inserted into the SQL string as is.
 
-scala```
-  val table = if (isDev) "dev_table" else "prod_table"
-  val q = sql"SELECT * FROM ${UNSAFE_direct(table)} WHERE ..."
+```scala
+val table = if (isDev) "dev_table" else "prod_table"
+val q = sql"SELECT * FROM ${UNSAFE_direct(table)} WHERE ..."
 ```
 
 The text of `q` will be (assuming isDev is true)
@@ -201,9 +250,9 @@ sql```SELECT * FROM dev_table WHERE ...```
 ### UNSAFE_relation
 Same as `UNSAFE_direct` except the string is double-quoted.
 
-scala```
-  val table = if (isDev) "dev_table" else "prod_table"
-  val q = sql"SELECT * FROM ${UNSAFE_direct(table)} WHERE ..."
+```scala
+val table = if (isDev) "dev_table" else "prod_table"
+val q = sql"SELECT * FROM ${UNSAFE_direct(table)} WHERE ..."
 ```
 
 becomes
@@ -219,12 +268,12 @@ set directly. This is useful when dealing with types not supported by JDBC inter
 
 Here we translate a boolean into Y/N to demonstrate:
 
-scala```
-  val isActive = false
-  val query = sql"""UPDATE foo SET is_active = ${Setter((psw, idx)=>{
-    psw.setString(idx, if (isActive) "Y" else "N")
-  )}"""
-  ...
+```scala
+val isActive = false
+val query = sql"""UPDATE foo SET is_active = ${Setter((psw, idx)=>{
+  psw.setString(idx, if (isActive) "Y" else "N")
+)}"""
+...
 ```
 
 The `Setter` constructor takes a "op" single argument. A function that takes the `PSWrapper` and the `Int` index of the value.
@@ -234,58 +283,107 @@ cannot be used to conditionally avoid setting a value.
 ## Options and null
 Options are treated intuitively.
 
-scala```
-  val maybeString = Some("foo")
-  val ps = conn.prepare(...)
-  val idx = ...
-  if (maybeString.isDefined) ps.setString(idx, maybeString.get)
-  else ps.setNull(idx, java.sql.Types.NULL)
+```scala
+val maybeString: Option[String] = Some("foo") // ensure type argument for options is defined
+val ps = conn.prepare(...)
+val idx = ...
+if (maybeString.isDefined) ps.setString(idx, maybeString.get)
+else ps.setNull(idx, java.sql.Types.NULL)
 ```
+
+On quirk is this fails:
+
+```scala sql"UPDATE foo SET bar = ${None}"```
+
+as the type parameter must still be known.
+
+```scala sql"UPDATE foo SET bar = ${None.asInstanceOf[Option[Int]]}"```
+
 
 When updating or inserting, responsibility rests with the user to ensure Options are only passed where column is nullable.
 
-If the JDBC Interop type descriminator encounters a naked null `setNull()` is called. This may change in future and an exception
-will the thrown instead: We are in Scala land where one expects Options any time a value could be nonexistant.
-Furthermore unboxed JVM value types cannot be null whereas columns of any type, even numeric types, can be nullable in typical RDBMS.
-Treating None as null provides a consistent way to encode nullable value types.
+If the JDBC Interop type descriminator encounters a naked null an exception is thrown. We are in Scala land where one expects 
+Options any time a value could be nonexistant. Furthermore, unboxed JVM value types (extends `AnyVal`) cannot be null whereas 
+columns of any type, even numeric types, are nullable in typical RDBMS. Treating None as null provides a consistent, 
+Scala-idiomatic way to encode nullability.
 
 ## Json
-Variables of type `play.api.libs.json.JsValue` can be passed where JSON is expected.
+Variables of type [`play.api.libs.json.JsValue`](https://github.com/playframework/play-json) can be passed where JSON is expected.
 
-Thus
-
-scala```
-  val data = Json.obj("foo" -> 42).toString
-  sql"""UPDATE raw_data SET json = data::json""" // use setString() and cast
+```scala
+  val data = Json.obj("foo" -> 42) // create JsObject
+  sql"""UPDATE raw_data SET json = $data"""  
 ```
 
-becomes
-
-scala```
-  val data = Json.obj("foo" -> 42)
-  sql"""UPDATE raw_data SET json = $data""" // JsObject passed directly, no cast
-```
-
-Currently PostgreSQL is the only database where automatic JSON handeling is effected. If `JsValue` is passed to an
+Currently PostgreSQL is the only database where automatic JSON handeling is supported. If `JsValue` is passed to an
 unsupported database an exception is thrown.
 
 ## Supported Types
 Apart from special types provided by JDBC Interop, the following well-known types are supported:
 
-JVM Type      | Set With                       | Notes
- ---          | ---                            | ---
-String        | setString                      |
-Boolean       | setBoolean                     |
-Int           | setInt                         |
-Long          | setLong                        |
-Double        | setDouble                      |
-java.sql.Date | setDate                        |
-Option[T]     | [depends on T]                 | See [Options and null]
-JsValue       | setObject                      | [only supported by PostgreSQL]
+| JVM Type      | Set With                       | Notes                          |
+| ------------- | ------------------------------ | ------------------------------ | 
+| String        | setString                      |                                |
+| Boolean       | setBoolean                     |                                |
+| Int           | setInt                         |                                | 
+| Long          | setLong                        |                                |
+| Double        | setDouble                      |                                |
+| java.sql.Date | setDate                        |                                |
+| Option[T]     | [depends on T]                 | See [Options and null]         | 
+| JsValue       | setObject                      | [only supported by PostgreSQL] |
 
 
+# DB API
+
+## Scopes 
+exec methods can be called directly from the `DB` instance. Alternatively "scopes" session and transaction can be created. 
+
+### withSession
+Reuses the same database connection for each query. Handy if you wish to access the same temp tables from multiple queries
+when using PostgreSQL, where temp tables are disposed after each session. 
+
+Unlike `withTransaction`, `withConnection` commits each query. However, nested transaction scopes can be created 
+within a connection scope. 
+
+**Note:** If you are using Hikari or other connection manager or if the databse is configured to close idle sessions 
+automatically: `withSessions` provides no means (such as polling the server) to force the connection to "stay alive". 
+
+### withTransaction
+All queries executed in this scope form part of the same transaction. As with `withSession`, `withTransaction` has no 
+means to prevent a connection manager or the database server from closing the session before the transaction is complete. 
+Queries forming part of a transaction should be performed serially with no significant pauses between queries.
 
 
+# Limitations
 
+## Prepared Statement API
 
+## Comile-Time Type Information
+To facilitate "reusable" queries as well as macro-generated queries in future, the types of variables passed to the 
+interpolator must be defined at compile time. For example, to pass None directly:
+
+```scala sql"UPDATE foo SET bar = ${None.asInstanceOf[Option[Int]]}"```
+
+## 22 Variable Limit
+Typically extensions to `StringContext` are variadic methods 
+(see: [Scala Docs](https://docs.scala-lang.org/overviews/core/string-interpolation.html)):
+
+```scala 
+implicit class FooHelper(val sc: StringContext) extends AnyVal {
+  def foo(args: Any*): Foo = ???
+}
+``` 
+
+However because the `sql` interpolator requires knowledge of each argument type, overloads must be synthesized for
+every arity supported.
+
+```scala 
+def sql[A : TypeTag, B : TypeTag](a: A, b: B) ... // arity-2 example
+```
+
+For now methods are only synthesized up to arity-22. 22 was chosen as it is the max tuple size, though technically methods
+taking longer arguments lists could be added. 
+
+## Proposed Features
+### Relations Whitelist
 
