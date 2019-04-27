@@ -1,8 +1,7 @@
 package com.jdbcinterop.core
 
-import com.jdbcinterop.dsl.{SQLList, Setters}
-
 import scala.reflect.runtime.universe._
+import scala.collection.mutable.ListBuffer
 
 object QueryBuilder {
   def empty: QueryBuilder = new QueryBuilder
@@ -10,7 +9,8 @@ object QueryBuilder {
 
 class QueryBuilder {
   //private var query: Query = Query.empty
-  private val root = scala.collection.mutable.ListBuffer.empty[VarNode]
+  private val root = ListBuffer.empty[QueryNode]
+  private val vars = ListBuffer.empty[Any]
 
   private def valueExpr[A : TypeTag](sample: A, isList: Boolean = false): QueryNode = {
     valueExpr(typeOf[A])
@@ -22,7 +22,10 @@ class QueryBuilder {
       ParamNode(setter, tpe)
   }
 
-  private def optionExpr(tpe: Type): OptionNode = OptionNode(valueExpr(tpe.typeArgs.head), tpe.typeArgs.head)
+  private def optionExpr(tpe: Type): OptionNode = {
+    val tpeArg = tpe.typeArgs.headOption.getOrElse(throw new IllegalArgumentException("Use Option[T](null) for None"))
+    OptionNode(valueExpr(tpeArg), tpeArg)
+  }
 
   private def listExpr(tpe: Type): ListNode = {
     // TODO: Screen out empty list
@@ -38,39 +41,61 @@ class QueryBuilder {
   private def mkNode(tpe: Type): VarNode = {
     tpe.typeSymbol.toString match {
       case "class SQLList" => listExpr(tpe)
-      case "class UNSAFE_Direct" => valueExpr(tpe) // This needs value at runtime unlike literal node
+      case "class UNSAFE_Direct" => DirectNode() // needs value at runtime unlike literal node
       case "class Setter" => valueExpr(tpe)
-      case "class Option" => optionExpr(tpe)
-      case s: String if s.startsWith("class scala.Tuple") => tupleExpr(tpe)
+      case "class Option" | "class Some" | "object None" => optionExpr(tpe)
+      case s: String if s.startsWith("class Tuple") => tupleExpr(tpe)
       case _ => valueExpr(tpe)
     }
   }
 
-  def addVariable[A : TypeTag](expr: A): QueryBuilder = {
-    val tpe = typeOf[A]
-    root :+ mkNode(tpe)
-    this
+  def addVariable[A : TypeTag](expr: A): QueryBuilder = expr.getClass.toString match {
+    case "class scala.runtime.BoxedUnit" => this // calling interpolation with 0 arguments actually passes Unit
+    case _ =>
+      vars += expr
+      val tpe = typeOf[A]
+      root += mkNode(tpe)
+      this
   }
 
   def addLiteral(text: String): QueryBuilder = {
-    root :+ LiteralNode(text)
+    root += LiteralNode(text)
     this
   }
 
-  def query(vars: Seq[Any]): Seq[Query] = {
-    val repeats = vars.map {
+  private def query(): Seq[Query] = {
+    val repeats: List[List[Any]] = vars.map {
       case l: SQLList[_] => l.chunks
       case a: Any => List(a)
-    }
+    }.toList
 
-    val repCount: Int = repeats.map(_.length).max
-    (0 to repCount).map(i=>repeats.map(l=>l.lift(i).getOrElse(l.head))).map(repeat=>{
+    // append `1` in case repeats is empty (`max` on empty Seq throws)
+    val repCount: Int = (repeats.map(_.length) :+ 1).max
+    (0 until repCount).map(i=>repeats.map(l=>l.lift(i).getOrElse(l.head))).map(repeat=>{
       val valIter = repeat.toIterator
       root.foldLeft(Query.empty)((b, a)=> a match {
-        case LiteralNode(text) => b.appendLiteral(text)
+        case l: LiteralNode => b.appendLiteral(l.text)
         case v: VarNode => v.appendTo(b)(valIter.next())
       })
     })
+  }
+
+  // Inserts variables directly into SQL and calls `toString`.
+  // Intended for debugging syntax errors in SQL generation.
+  def printQuery(): Unit = {
+    val q = query().head
+    val varIter = q.setters.map(_.__value).toIterator
+    println(q.sqlFrags.map {
+        case "?" => varIter.next() match {
+          case s: String => s""""$s""""
+          case a: Any => a.toString
+        }
+        case s: String => s
+      }.mkString(""))
+  }
+
+  def mkStatement(conn: ConnWrapper): Seq[PSWrapper] ={
+    query().map(_.prepare().exec(conn))
   }
 }
 
@@ -87,24 +112,39 @@ case class Query(sqlFrags: List[String], qmCount: Int, setters: List[SetValue]) 
       setters = this.setters ++ setters
     )
   }
-  def appendSetter(setter: SetValue): Query = unsafeAppend(setters = List(setter))
+
+  def appendSetter(setter: SetValue): Query = appendQM.unsafeAppend(setters = List(setter))
+
   def incQMCount(amount: Int = 1): Query = unsafeAppend(qmCount = amount)
+
   def appendLiteral(text: String): Query = {
     unsafeAppend(
       sqlFrags = List(text),
       qmCount = if (text == "?") 1 else 0)
   }
+
   def appendParen(open: Boolean): Query = appendLiteral(if (open) "(" else ")")
+
   def withParen(forReal: Boolean)(op: Query => Query): Query = {
     if (forReal) op(this.appendParen(open = true)).appendParen(open = false) else op(this)
   }
-  def appendQM: Query = {
+
+  def appendComma: Query = appendLiteral(",")
+
+  def trimEnd(text: String): Query = {
+    if (sqlFrags.lastOption.orNull == text) copy(sqlFrags = sqlFrags.slice(0, sqlFrags.length - 1))
+    else this
+  }
+
+  private def appendQM: Query = {
     (if (sqlFrags.lastOption.getOrElse("") == "?") this.appendLiteral(",") else this).appendLiteral("?")
   }
 
   def prepare(): QueryReady = {
+    val sql = sqlFrags.mkString("")
+    //println("[QueryReady]" + sql)
     QueryReady(
-      sql = sqlFrags.mkString(""),
+      sql = sql,
       setters = setters
     )
   }
@@ -112,7 +152,7 @@ case class Query(sqlFrags: List[String], qmCount: Int, setters: List[SetValue]) 
 
 
 case class QueryReady(sql: String, setters: Seq[SetValue]) {
-  def exec(conn: ConnWrapper, flavor: DBFlavorTrait): PSWrapper = {
+  def exec(conn: ConnWrapper): PSWrapper = {
     val psw = conn.prepareStatement(sql)
     setters.foreach(_.set(psw))
     psw
@@ -120,11 +160,12 @@ case class QueryReady(sql: String, setters: Seq[SetValue]) {
 }
 
 
-case class SetValueCtx[VALUE](psw: PSWrapper, idx: Int, flavor: DBFlavorTrait, value: Any)
-
 trait SetValue {
+  // for debugging reference @DB
+  val __value: Any
   def set(psw: PSWrapper): Unit
 }
+
 
 trait QueryNode
 
@@ -135,8 +176,7 @@ trait VarNode extends QueryNode {
 case class ParamNode(setValue: Setters.PSSetter[_], tpe: Type) extends VarNode {
   override def appendTo(query: Query)(value: Any): Query = {
     val setter = new SetValue {
-      val paramSort: Int = paramSort
-      val querySort: Int = querySort
+      val __value: Any = value
       override def set(psw: PSWrapper): Unit = setValue.set(SetValueCtx(
         psw = psw,
         idx = query.qmCount + 1,
@@ -144,7 +184,7 @@ case class ParamNode(setValue: Setters.PSSetter[_], tpe: Type) extends VarNode {
         value = value
       ))
     }
-    query.appendSetter(setter).appendQM
+    query.appendSetter(setter)
   }
 }
 
@@ -152,10 +192,21 @@ case class OptionNode(paramNode: ParamNode, tpe: Type) extends VarNode {
   override def appendTo(query: Query)(value: Any): Query = {
     value.asInstanceOf[Option[_]].map(v=>paramNode.appendTo(query)(v)).getOrElse({
       val setter = new SetValue {
+        override val __value: Any = value
         override def set(psw: PSWrapper): Unit = psw.setNull(query.qmCount + 1)
       }
-      query.appendSetter(setter).appendQM
+      query.appendSetter(setter)
     })
+  }
+}
+
+object DirectNode {
+  def apply(): DirectNode = new DirectNode()
+}
+
+class DirectNode extends VarNode {
+  override def appendTo(query: Query)(value: Any): Query = {
+    query.appendLiteral(value.asInstanceOf[UNSAFE_Direct].a.toString)
   }
 }
 
@@ -167,11 +218,11 @@ case class LiteralNode(text: String) extends QueryNode
     var query: Query = query0
     val values = value.asInstanceOf[Product].productIterator.toList
     for (i <- children.indices) {
-      val v = values(i)
-      var n = children(i)
-      query = n match {
+      val value = values(i)
+      var node = children(i)
+      query = node match {
         case l: LiteralNode => query.appendLiteral(l.text)
-        case v: VarNode => v.appendTo(query)(v)
+        case n: VarNode => n.appendTo(query)(value  )
       }
     }
     query
@@ -183,8 +234,8 @@ case class ListNode(child: VarNode) extends VarNode {
     val list = value.asInstanceOf[SQLList[_]]
     query0.withParen(forReal = !list.open)(query0=>{
       var query: Query = query0
-      for (value <- list.values) query = child.appendTo(query)(value)
-      query
+      for (value <- list.values) query = child.appendTo(query)(value).appendComma
+      query.trimEnd(",")
     })
   }
 }

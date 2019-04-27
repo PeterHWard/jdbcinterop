@@ -1,6 +1,8 @@
 import org.scalatest.FlatSpec
 import play.api.libs.json.{JsObject, Json}
+import com.jdbcinterop.core.{SQLList}
 import com.jdbcinterop.dsl._
+import com.jdbcinterop.dsl.interpolation._
 
 object IntegrationTests {
 
@@ -55,7 +57,7 @@ class SQLInterpolationSpec extends IntegrationSpec {
 
   it should "insert a new record" in {
     withTable("a")
-    assert(u(sql"""INSERT INTO a VALUES ${(4, "4")}""") == 1)
+    assert(u(sql"""INSERT INTO a VALUES ${(4, "s4")}""") == 1)
   }
 
   it should "insert 3 new records" in {
@@ -73,14 +75,14 @@ class SQLInterpolationSpec extends IntegrationSpec {
 
   it should "set null" in {
     withTable("nullable")
-    assert(db.execUpdate(sql"""INSERT INTO nullable VALUES ${(null, null)}""") == 1)
+    assert(db.execUpdate(sql"""INSERT INTO nullable VALUES ${(None.asInstanceOf[Option[Int]], Option[String](null))}""") == 1)
   }
 
   it should "take an Option" in {
     withTable("nullable")
     assert(db.execUpdate(sql"""INSERT INTO nullable VALUES ${openList((8, Some("8")))}""") == 1)
     assert(db.execQuery(sql"""SELECT * FROM nullable WHERE int_col = 8""")(_.getString("text_col").get).head == "8")
-    assert(db.execUpdate(sql"""INSERT INTO nullable VALUES ${openList((None, "null"))}""") == 1)
+    assert(db.execUpdate(sql"""INSERT INTO nullable VALUES ${openList((None.asInstanceOf[Option[Int]], "null"))}""") == 1)
   }
 
   it should "find 3 results" in {
@@ -127,5 +129,17 @@ class SQLInterpolationSpec extends IntegrationSpec {
     u(sql"""UPDATE j SET json = $j WHERE id = 1""")
     val jval = q(sql"""SELECT json FROM j WHERE id = 1""")(_.getJsValue("json")).head
     assert((jval.as[JsObject] \ "key").as[Int] == 42)
+  }
+
+  it should "split long list" in {
+    withTable("a")
+    u(sql"INSERT INTO a VALUES (${3001}, ${"You got me"})")
+    val ids = SQLList(1 to 3500, abortIfEmpty = true, maxLength = 1000)
+    assert(ids.chunks.length == 4)
+    assert(q(
+      sql"""
+       SELECT * FROM a WHERE id IN $ids
+       AND text_col = 'You got me'""")
+    (_.getString("text_col").get).head == "You got me")
   }
 }

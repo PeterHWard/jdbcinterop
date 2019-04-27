@@ -1,12 +1,13 @@
-package com.jdbcinterop.dsl
+package com.jdbcinterop.core
 
 import scala.reflect.runtime.universe._
-import java.sql.{Date, Types}
+import java.sql.{Date}
 
-import org.postgresql.util.PGobject
-import play.api.libs.json.JsValue
-import com.jdbcinterop.core.DBFlavor.PostgreSQL
-import com.jdbcinterop.core.{SQLType, SetValueCtx}
+import play.api.libs.json.{JsValue, JsObject}
+
+case class SetValueCtx[VALUE](psw: PSWrapper, idx: Int, flavor: DBFlavorTrait, value: Any) {
+  def valueAs[T]: T = value.asInstanceOf[T]
+}
 
 object Setters {
   type SetValueFunc[VALUE] = (SetValueCtx[VALUE]) => Unit
@@ -14,61 +15,38 @@ object Setters {
 
   // auto-generated
   val setString: PSSetter[String] = PSSetter(
-    set = (ctx: SetValueCtx[String]) => ctx.psw.preparedStatement.setString(ctx.idx, ctx.value.asInstanceOf[String]),
-    types = Seq(typeOf[String]))
+    set = (ctx: SetValueCtx[String]) => ctx.psw.preparedStatement.setString(ctx.idx, ctx.valueAs[String]),
+    types = Seq(typeOf[String],typeOf[java.lang.String]))
   val setLong: PSSetter[Long] = PSSetter(
-    set = (ctx: SetValueCtx[Long]) => ctx.psw.preparedStatement.setLong(ctx.idx, ctx.value.asInstanceOf[Long]),
-    types = Seq(typeOf[Long]))
+    set = (ctx: SetValueCtx[Long]) => ctx.psw.preparedStatement.setLong(ctx.idx, ctx.valueAs[Long]),
+    types = Seq(typeOf[Long],typeOf[java.lang.Long]))
   val setInt: PSSetter[Int] = PSSetter(
-    set = (ctx: SetValueCtx[Int]) => ctx.psw.preparedStatement.setInt(ctx.idx, ctx.value.asInstanceOf[Int]),
+    set = (ctx: SetValueCtx[Int]) => ctx.psw.preparedStatement.setInt(ctx.idx, ctx.valueAs[Int]),
     types = Seq(typeOf[Int]))
   val setDouble: PSSetter[Double] = PSSetter(
-    set = (ctx: SetValueCtx[Double]) => ctx.psw.preparedStatement.setDouble(ctx.idx, ctx.value.asInstanceOf[Double]),
-    types = Seq(typeOf[Double]))
+    set = (ctx: SetValueCtx[Double]) => ctx.psw.preparedStatement.setDouble(ctx.idx, ctx.valueAs[Double]),
+    types = Seq(typeOf[Double],typeOf[java.lang.Double]))
   val setDate: PSSetter[Date] = PSSetter(
-    set = (ctx: SetValueCtx[Date]) => ctx.psw.preparedStatement.setDate(ctx.idx, ctx.value.asInstanceOf[Date]),
+    set = (ctx: SetValueCtx[Date]) => ctx.psw.preparedStatement.setDate(ctx.idx, ctx.valueAs[Date]),
     types = Seq(typeOf[Date]))
 
   // hard-coded
   val setSetter: PSSetter[Setter] = PSSetter(
-    set = (ctx: SetValueCtx[Setter]) => ctx.value.asInstanceOf[Setter].op(ctx.psw),
+    set = (ctx: SetValueCtx[Setter]) => ctx.psw.setSetter(ctx.idx, ctx.valueAs[Setter]),
     types = Seq(typeOf[Setter]))
   val setNull: PSSetter[Any] = PSSetter(
-    set = (ctx: SetValueCtx[Any]) => ctx.psw.preparedStatement.setNull(ctx.idx, Types.NULL),
+    set = (ctx: SetValueCtx[Any]) => ctx.psw.setNull(ctx.idx),
     types = Seq())
-  /* Handle like list
-    val setOption: PSSetter[Option[_]] = PSSetter(
-    set = (ctx: SetValueCtx[Option[_]]) => {
-      if (ctx.value.isDefined) {
-        ???
-      } else {
-        setNull.set(ctx)
-      }
-    },
-    types = Seq(typeOf[Option[_]]))
-  )*/
+  val setNone: PSSetter[Any] = PSSetter(
+    set = (ctx: SetValueCtx[Any]) => ctx.psw.setNull(ctx.idx),
+    types = Seq(typeOf[scala.None.type]))
   val setArray: PSSetter[SQLArray[_]] = PSSetter(
-    set = (ctx: SetValueCtx[SQLArray[_]]) => {
-      val ps = ctx.psw.preparedStatement
-      val sqlArray = ctx.value.asInstanceOf[SQLArray[_]]
-      val arr = ps.getConnection.createArrayOf(
-        SQLType(sqlArray.typeArg, ctx.flavor).nativeType,
-        sqlArray.asInstanceOf[SQLArray[_]].values.map(_.asInstanceOf[AnyRef]).toArray)
-      ps.setArray(ctx.idx, arr)},
-      types = Seq(typeOf[SQLArray[_]]))
+    set = (ctx: SetValueCtx[SQLArray[_]]) => ctx.psw.setArray(ctx.idx, ctx.valueAs[SQLArray[_]]),
+      types = Seq(typeOf[SQLArray[String]],typeOf[SQLArray[java.lang.String]],typeOf[SQLArray[Long]],typeOf[SQLArray[java.lang.Long]],typeOf[SQLArray[Int]],typeOf[SQLArray[Double]],typeOf[SQLArray[java.lang.Double]],typeOf[SQLArray[Date]]))
   val setJsValue: PSSetter[JsValue] = PSSetter(
-    set = (ctx: SetValueCtx[JsValue]) => {
-      val ps = ctx.psw.preparedStatement
-      ctx.flavor match {
-        case PostgreSQL =>
-          var po = new PGobject()
-          po.setType("json")
-          po.setValue(ctx.value.asInstanceOf[JsValue].toString())
-          ps.setObject(ctx.idx, po)
-        case _ => throw new IllegalArgumentException("No JSON support for " + ctx.flavor)
-      }},
-    types = Seq(typeOf[SQLArray[_]]))
+    set = (ctx: SetValueCtx[JsValue]) => ctx.psw.setJson(ctx.idx, ctx.valueAs[JsValue]),
+    types = Seq(typeOf[JsValue], typeOf[JsObject]))
 
-  val allSetters: Seq[PSSetter[_]] = Seq(setString,setLong,setInt,setDouble,setDate)
+  val allSetters: Seq[PSSetter[_]] = Seq(setString,setLong,setInt,setDouble,setDate,setSetter,setJsValue,setNull,setArray)
   def find[VALUE](tpe: Type): Option[PSSetter[VALUE]] = allSetters.find(_.types.contains(tpe)).asInstanceOf[Option[PSSetter[VALUE]]]
 }

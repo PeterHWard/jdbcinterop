@@ -1,4 +1,4 @@
-import com.jdbcinterop.dsl.Setter
+import com.jdbcinterop.core.SQLArray
 
 import scala.reflect.runtime.universe._
 import scala.reflect._
@@ -6,10 +6,8 @@ import scala.reflect._
 def cast[A](a: Any, tt: TypeTag[A]): A = a.asInstanceOf[A]
 
 def targ[T: TypeTag](arg: T): String = {
-  val tpe0: TypeTag[_] = typeTag[String]
-  val bar: Any = 1
-  val s: String = 10.// cast(bar, tpe0)
-  s
+  //(typeOf[Tuple1[Int]].typeSymbol == typeOf[Tuple2[String, Int]].typeSymbol).toString
+  typeOf[T].toString
 }
 
-println(targ(Setter((psw, int)=>())))
+println(">>> " + targ(SQLArray(Seq(""))))

@@ -1,12 +1,9 @@
 package com.jdbcinterop.core
 
-import java.sql.{Connection, Date, PreparedStatement, ResultSet, Types}
+import java.sql.{Connection, PreparedStatement, ResultSet, Types}
 import org.postgresql.util.PGobject
 import play.api.libs.json.{JsValue, Json}
 
-import scala.reflect.runtime.universe._
-
-import com.jdbcinterop.dsl.{SQLArray, Setter}
 import com.jdbcinterop.core.DBFlavor._
 
 
@@ -14,36 +11,31 @@ trait PSWrapper {
   val preparedStatement: PreparedStatement
   val flavor: DBFlavorTrait
 
-  def autoSet[T: TypeTag](idx: Int, value: T) : Unit = {
-    val ps = preparedStatement
-    value match {
-      case t: Setter => t.op(this, idx)
-      case s: String => ps.setString(idx, s)
-      case i: Int => ps.setInt(idx, i)
-      case l: Long => ps.setLong(idx, l)
-      case d: Double => ps.setDouble(idx, d)
-      case d: Date => ps.setDate(idx,d)
-      case o: Option[_] => autoSet[Any](idx, o.orNull)
+  def mkPGJson(json: String): PGobject = {
+    var po = new PGobject()
+    po.setType("json")
+    po.setValue(json)
+    po
+  }
 
-      case a: SQLArray[_] =>
-        val arr = ps.getConnection.createArrayOf(
-          SQLType(a.typeArg, flavor).nativeType,
-          a.values.map(_.asInstanceOf[AnyRef]).toArray)
-        ps.setArray(idx, arr)
-
-      case j: JsValue =>
-        flavor match {
-          case PostgreSQL =>
-            var po = new PGobject()
-            po.setType("json")
-            po.setValue(j.toString())
-            ps.setObject(idx, po)
-          case _ => throw new IllegalArgumentException("No JSON support for " + flavor)
-        }
-      case null => ps.setNull(idx, Types.NULL) // FIXME: Verify always using varchar works
-      case a: Any => throw new IllegalArgumentException("Unsupported type: " + a.getClass)
+  def setJson(idx: Int, json: JsValue): Unit = {
+    flavor match {
+      case PostgreSQL => preparedStatement.setObject(idx, mkPGJson(json.toString()))
+      case _ => throw new IllegalArgumentException("No JSON support for " + flavor)
     }
   }
+
+  def mkArray[A](array: SQLArray[A]): java.sql.Array = {
+    preparedStatement.getConnection.createArrayOf(
+      TypeMap(array.typeArg, flavor).nativeType,
+      array.values.map(_.asInstanceOf[AnyRef]).toArray)
+  }
+
+  def setArray[A](idx: Int, array: SQLArray[A]): Unit = {
+   preparedStatement.setArray(idx, mkArray(array))
+  }
+
+  def setSetter(idx: Int, setter: Setter): Unit = setter.op(this, idx)
 
   def setNull(idx: Int): Unit = preparedStatement.setNull(idx, Types.NULL)
 }
@@ -82,7 +74,6 @@ trait ConnectionProvider {
   val flavor: DBFlavorTrait
   def withConnection[R](op: Connection => R): R
 }
-
 
 object DB {}
 

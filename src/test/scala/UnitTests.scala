@@ -1,7 +1,6 @@
-import com.jdbcinterop.TestMacros
 import org.scalatest.FlatSpec
 import com.jdbcinterop.core._
-
+import com.jdbcinterop.dsl.interpolation._
 
 object UnitTests {
 
@@ -13,22 +12,22 @@ class toSqlTypeSpec extends UnitSpec {
   import scala.reflect.runtime.universe._
 
   "toSqlType" should "yield nativeType of `text`" in {
-    assert(SQLType(typeOf[String], DBFlavor.PostgreSQL).nativeType == "text")
+    assert(TypeMap(typeOf[String], DBFlavor.PostgreSQL).nativeType == "text")
   }
 
   it should "fail with unsupported type Foo" in {
     object Foo
-    assertThrows[IllegalArgumentException](SQLType(typeOf[Foo.type], DBFlavor.PostgreSQL))
+    assertThrows[IllegalArgumentException](TypeMap(typeOf[Foo.type], DBFlavor.PostgreSQL))
   }
 }
 
+/*
 class SQLInterpolation extends UnitSpec {
-  import com.jdbcinterop.dsl._
   "SQLInterpolation" should "work" in {
-    assert(sql2"${42}" == "Int")
-    assert(sql2"${"foo"} ${42}" == "java.lang.String Int")
+    assert(sql"${42}" == "Int")
+    assert(sql"${"foo"} ${42}" == "java.lang.String Int")
   }
-}
+}*/
 
 /*
 class MacroSpec extends UnitSpec {
