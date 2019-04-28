@@ -1,6 +1,8 @@
 import java.sql.{Connection, DriverManager}
 
-import com.jdbcinterop.core.{DB, ConnectionProvider, DBFlavor, DBFlavorTrait}
+import com.jdbcinterop.core.{ConnectionProvider, DB, DBFlavor, DBFlavorTrait}
+
+import scala.util.Try
 
 class H2DB extends DB with ConnectionProvider {
   override val flavor: DBFlavorTrait = DBFlavor.H2
@@ -17,6 +19,8 @@ class PGDB extends DB with ConnectionProvider {
   override def withConnection[R](op: Connection => R): R = {
     Class.forName("org.postgresql.Driver")
     val conn = DriverManager.getConnection("jdbc:postgresql://[::1]:5432/test", "peter", "getmein")
-    op(conn)
+    val res = op(conn)
+    Try(conn.close())
+    res
   }
 }

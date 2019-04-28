@@ -43,13 +43,17 @@ JDBC Interop is not an ORM or functional abstraction for working with RDBMS. If 
 It is not a parser or code generator. It simply provides sugar for producing prepared statements. If you wish to compose
 SQL programmatically consider Quill.
 
+It is not a connection pool manager. The `DB` API closes connections and prepared statements automatically to help prevent
+connection leaks. However, should be used in conjunction with not as an alternative to a framework like 
+[HikariCP](https://github.com/brettwooldridge/HikariCP).
+
 
 # TODO
 - DB API
 
 
 # Interpolation DSL
-JDBC Interop's key feature. Allows variables to be placed directly in SQL string and hopefully "does the right thing".
+JDBC Interop's key feature. Allows variables to be placed directly in a SQL string and hopefully "does the right thing".
 
 ```scala
 val db: DB = ...
@@ -59,7 +63,7 @@ db.executeQuery(query)(rsw=> /* code to map over result set here */) ...
 ```
 
 This might look scary, but note the `sql` prefix. `query` is not a string but a special function that gets consumed by
-one of `DB`'s exec methods - `executeQuery()`` in this example. Under the hood something like this is happening:
+one of `DB`'s exec methods - `executeQuery()` in this example. Under the hood something like this is happening:
 
 ```scala
 val conn: java.sql.Connection = ...
@@ -68,22 +72,20 @@ ps.setString(1, name)                                               // we safely
 ```
 
 ## SQL Injection
-JDBC Interop uses JDBC prepared statements of generate queries. The `sql` string interpolator  is doing more than naive
-variable/text substition. Variables passed to `sql` interpolator methods are either converted to a single ? or in the
-case of tuples and lists used to produce tuple/list constants - also properly ?-paremeterized.
+JDBC Interop uses JDBC prepared statements to generate queries. The `sql` string interpolator is doing more than naive
+variable/text substition. Variables passed to `sql` interpolator methods are either converted to a single ? or, in the
+case of tuples and lists, used to produce tuple/list constants - also properly ?-paremeterized.
 
 For cases where direct string interpolation is required, JDBC Interop offers special unsafe methods and classes whose
-names start with UNSAFE. These *do* insert text directly into the query string and are subject to SQL injection.
+names start with UNSAFE. These *do* insert text directly into the query string and are subject to SQL injection if misused.
 
-**Note:** Because JDBC Interop adds a layer of indirection on top of the JDBC API there is always a (small) risk that JDBC 
-Interop will introduce vulnerabilities that don't exist in JDBC. 
 
 ### Eample - Single Value
 ```scala 
 sql"UPDATE foo SET bar = ${42}"
 ```
 
-Effectively becomes:
+effectively becomes:
 
 ```scala
 val ps = conn.prepare("UPDATE foo SET bar = ?")   
@@ -95,7 +97,7 @@ ps.setInt(1, 42)
 sql"INSERT INTO foo VALUES ${(1, "bar")}"
 ```
 
-Effectively becomes:
+effectively becomes:
 
 ```scala
 val ps = conn.prepare("INSERT INTO foo VALUES (?, ?)")  
@@ -108,7 +110,7 @@ ps.setString(2, "bar")
 sql"SELECT * FROM foo WHERE id IN ${list(Seq(1,2,3,...)}"
 ```
 
-Effectively becomes:
+effectively becomes:
 
 ```scala
 val ps = conn.prepare("ISELECT * FROM foo WHERE id IN (?,?,?,...)")  
@@ -118,21 +120,38 @@ ps.setInt(3, 3)
 ...
 ```
 
-## Lists and Arrays
-Tuples as well as the DSL's `SQLList[A]`` class are converted to SQL list constants. The following
+## Lists
+Tuples and lists produce the same syntatic result. 
 
 ```scala
-sql"SELECT * FROM foo WHERE id IN ($1,$2,$3)"
-sql"SELECT * FROM foo WHERE id IN ${(1,2,3)}"
-sql"SELECT * FROM foo WHERE id IN ${SQLList(Seq(1,2,3), false)}" // SQLList configuration explained below
+sql"SELECT * FROM foo WHERE id IN ($1,$2,$3)"           // values passed separately
+sql"SELECT * FROM foo WHERE id IN ${(1,2,3)}"           // Scala Tuple3
+sql"SELECT * FROM foo WHERE id IN ${list(Seq(1,2,3))}"  // DSL method accepting Seq
 ```
 
-all translate to:
+Result: 
 
-sql```SELECT * FROM foo WHERE id IN (?,?,?)```
+```sql
+SELECT * FROM foo WHERE id IN (?,?,?)
+```
+
+However lists are 
+- variable length
+- all values of the same type
+- incur greater runtime overhead as a `?` has to be inserted dynamically for each item
+ 
+The ability to produce constants from arbitrarily long lists is probably JDBC Interop's most useful feature.
+Normally, prepared statements require knowing the length of lists ahead of time.
+
+### list
+Create an SQLList[A] instance from a Seq[A] with default configuration.
+
+```scala
+sql"SELECT * FROM foo WHERE id IN ${list(Seq(1,2,3))}"  
+```
 
 ### open
-An "open" list can be created with
+An "open" list can be created:
 
 ```scala
 INSERT INTO foo (id, flag) VALUES ${open(
@@ -142,68 +161,39 @@ INSERT INTO foo (id, flag) VALUES ${open(
 )}
 ```
 
-this generates:
+This generates:
 
-sql```
+```sql
 INSERT INTO foo (id, flag) VALUES
   (?, ?),
   (?, ?),
   (?, ?)
 ```
 
-The ability to produce constants from arbitrarily long lists is probably JDBC Interop's most useful feature.
-Normally, prepared statements require knowing the length of lists ahead of time.
-
-sql```SELECT * FROM foo WHERE id IN (?,?,?,?,?)```
-
-JDBC Interop dynamically creates list constants with `?`s for each item, then sets each ? based on the associated item's type.
-
-The user code:
-
-```scala
-val activeStatus = false
-val flags = Seq(("a","b","c","b","e"))
-
-val query = sql"""
-    SELECT * FROM foo WHERE flag IN ${SQLList(flags, abortIfEmpty=true)}
-    AND active = ${activeStatus}"""
-```
-
-effectively becomes:
-
-```scala
-val ps: PrepatedStatement = conn.prepare("SELECT * FROM foo WHERE id IN (?,?,?,?.?)\nAND active = ?")
-ps.setString(1, "a")
-ps.setString(2, "b")
-ps.setString(3, "c")
-ps.setString(4, "d")
-ps.setString(5, "e")
-ps.setBoolean(6, false)
-```
-
 ### SQLList[A] Class
-Instead of passing a tuple the `SQLList[A]` case class can be instantiated directly. This affords several config options:
+The `SQLList[A]` class can be instantiated directly affording several config options:
 
 ```scala
 SQLList[A](
   values: Seq[A]                  // the source seq, required
-  abortIfEmpty: Boolean,          // See [target]
+  abortIfEmpty: Boolean,          // See [TBA]
   open: Boolean = false,          // if true enclosing parens omitted
-  maxLength: Option[Int] = None   // See [target]
-  autoChunk: Boolean = false      // See [target]
+  maxLength: Option[Int] = None   // See [TBA]
+  autoChunk: Boolean = false      // See [TBA]
 )
 ```
 
 ### Empty List Handling
 In many contexts an empty list constant is a syntax error. `SQLList#abortIfEmpty` sort-circuits query execution
-if an empty list is encountered. Exec methods like `execQuery()` mapping over a result set will return Nil while methods returing `Boolean`
-will return false. This enables "safe" execution when creating a list from a sequence type that could be empty.
+if an empty list is encountered. Exec methods like `execQuery()` mapping over a result set will return `Nil` while 
+methods returning `Boolean` will return `false`. This enables "safe" execution when creating a list from a sequence type 
+that could be empty.
 
-If `SQLList#abortIfEmpty` is false (the default), the query execution is attempted possibly resulting in an exception or
+If `SQLList#abortIfEmpty` is `false` (the default), the query execution is attempted possibly resulting in an exception or
 other unexpected behavior.
 
 In general, its best practice for your code to guard against empty lists being passed. In the case of a WHERE IN,
-returning Nil seems intuitive. But in most other situations another strategy is probably best. Validating user inputs
+returning `Nil` seems intuitive. But in most other situations another strategy is probably best. Validating user inputs
 to ensure at least one value is given, for example.
 
 ### Maximum Length for Lists
@@ -211,32 +201,34 @@ Some databases impose a limit on the size of list constants (1000 for Oracle 11g
 property you may specify that an exception is thrown if a list of greater than `maxLength` would be created.
 
 If `SQLList#autoChunk` is true, queries with lists longer than `maxLength` will be split into chunks. This feature is only
-supported for queries where a single list of greater than `SQLList#maxLength` exits. It is encumbenet on the user to ensure
-the rest of the query works the same in spite of chunkification.
+supported for queries where a single list of greater than `SQLList#maxLength` exits. It is incumbent on the user to ensure
+the rest of the query is unaffected by the "chunkification".
 
 As with empty lists, lists that exceed a certain bounds should in most cases be addressed by user code rather than rely
-on JDBC interop to automagically fix problems. For long where in lists where the rest of the query is static they can prove handy.
+on JDBC interop to automagically gloss over problems. For long where in lists where the rest of the query is static they 
+can prove handy though.
 
 ### SQL Array
-Because of the way variables are passed through `StringContext`, I was unable to overcome type erasure even using `TypeTags`.
-Therefore sequences types are not automatically treated as arrays. An intance of SQLArray[A], which reliably obtains the type of
-type argument A, is required. To define via the DSL use use the `array()` method:
+Currently sequence types passed directy are not treated as arrays. This may change in future. To statically define an 
+array via the DSL use:
 
 ```scala
-UPDATE foo SET arr = ${array("X", "Y", "Z") WHERE ...} // ensures an array of the correct type is created (`text[]` for PostgreSQL)
+sql"UPDATE foo SET arr = ${array("X", "Y", "Z")} WHERE ..." 
  ```
 
-If you wish to create an array from a sequence type use the SQLArray[A] class.
+If you wish to create an array from a sequence type use the `SQLArray[A]` class.
 
-```scalaval arr = SQLArray(Seq("a","b","c"))```
+```scala 
+sql"UPDATE foo SET arr = ${SQLArray(Seq("X", "Y", "Z"))} WHERE ..." 
+```
 
 ## UNSAFE Methods and Classes
-The DSL offers an escape hatch where regular string interpolation needs to be achived. These methods and classes are "unsafe".
-The values they produce are inserted as is with no sanitization into the query. The must not be given data from user inputs
-as this create an SQL injection vector.
+The DSL offers an escape hatch where regular string interpolation needs to be achived. These methods and classes are "unsafe"
+meaning the values they produce are inserted as-is with no sanitization into the query. They must not be feed data from user inputs
+as doing so will create an SQL injection vector.
 
 ### UNSAFE_direct
-The UNSAFE_direct DSL method allows a variable to be inserted into the SQL string as is.
+The `UNSAFE_direct()` DSL method allows a variable to be inserted into the SQL string as-is.
 
 ```scala
 val table = if (isDev) "dev_table" else "prod_table"
@@ -245,7 +237,9 @@ val q = sql"SELECT * FROM ${UNSAFE_direct(table)} WHERE ..."
 
 The text of `q` will be (assuming isDev is true)
 
-sql```SELECT * FROM dev_table WHERE ...```
+```sql 
+SELECT * FROM dev_table WHERE ...
+```
 
 ### UNSAFE_relation
 Same as `UNSAFE_direct` except the string is double-quoted.
@@ -259,20 +253,18 @@ becomes
 
 sql```SELECT * FROM "dev_table" WHERE ...```
 
-As with `UNSAFE_direct`, `UNSAFE_relation` does not sanatize the input and must never be called with user input text/data.
+As with `UNSAFE_direct`, `UNSAFE_relation` does not sanitize the input and must never be called with user input text/data.
 JDBC does not provide a safe way to set column or other relation names dynamically.
 
 ## Setter
-The `Setter` class provides a direct access to the `PSWrapper` and underlying prepared statement so that a value can be
+The `Setter` class provides "low level" access to the `DB` API's `PSWrapper` and underlying prepared statement so that a value can be
 set directly. This is useful when dealing with types not supported by JDBC interop.
 
-Here we translate a boolean into Y/N to demonstrate:
+In this silly example we translate a boolean into "Y"/"N" to demonstrate:
 
 ```scala
-val isActive = false
-val query = sql"""UPDATE foo SET is_active = ${Setter((psw, idx)=>{
-  psw.setString(idx, if (isActive) "Y" else "N")
-)}"""
+val setter = Setter((psw, idx)=>psw.preparedStatement.setString(idx, if (true) "Y" else "N"))
+val query = sql"""UPDATE foo SET is_active = $setter"""
 ...
 ```
 
@@ -283,36 +275,46 @@ cannot be used to conditionally avoid setting a value.
 ## Options and null
 Options are treated intuitively.
 
+User code:
 ```scala
-val maybeString: Option[String] = Some("foo") // ensure type argument for options is defined
+val maybeString: Option[String] = Some("foo") // ensure type argument for Option is defined - `String` here
+val q = sql"UPDATE some_table SET text_column = $maybeString WHERE ..."   
+...
+```
+
+Psuedo code illustrating logic of JDBC Interop internals:
+```scala
 val ps = conn.prepare(...)
 val idx = ...
 if (maybeString.isDefined) ps.setString(idx, maybeString.get)
 else ps.setNull(idx, java.sql.Types.NULL)
 ```
 
-On quirk is this fails:
+One quirk using Options is this fails:
 
-```scala sql"UPDATE foo SET bar = ${None}"```
+```scala 
+sql"UPDATE foo SET bar = ${None}"
+```
 
-as the type parameter must still be known.
+as the type parameter must still be known. Instead use:
 
-```scala sql"UPDATE foo SET bar = ${None.asInstanceOf[Option[Int]]}"```
+```scala 
+sql"UPDATE foo SET bar = ${None.asInstanceOf[Option[Int]]}"
+```
 
+When updating or inserting, responsibility rests with the user to ensure Options are only passed where the column is nullable.
 
-When updating or inserting, responsibility rests with the user to ensure Options are only passed where column is nullable.
-
-If the JDBC Interop type descriminator encounters a naked null an exception is thrown. We are in Scala land where one expects 
-Options any time a value could be nonexistant. Furthermore, unboxed JVM value types (extends `AnyVal`) cannot be null whereas 
-columns of any type, even numeric types, are nullable in typical RDBMS. Treating None as null provides a consistent, 
+If the JDBC Interop type discriminator encounters a naked `null` an exception is thrown. We are in Scala land where one expects 
+Options any time a value could be nonexistant. Furthermore, unboxed JVM value types (i.e., those extending `AnyVal` such as Int) 
+cannot be null whereas columns of any type, even numeric types, may nullable in typical RDBMS. Treating None as null provides a consistent, 
 Scala-idiomatic way to encode nullability.
 
 ## Json
 Variables of type [`play.api.libs.json.JsValue`](https://github.com/playframework/play-json) can be passed where JSON is expected.
 
 ```scala
-  val data = Json.obj("foo" -> 42) // create JsObject
-  sql"""UPDATE raw_data SET json = $data"""  
+val data = Json.obj("foo" -> 42) // create JsObject
+val query = sql"""UPDATE raw_data SET json = $data"""  
 ```
 
 Currently PostgreSQL is the only database where automatic JSON handeling is supported. If `JsValue` is passed to an
@@ -336,7 +338,7 @@ Apart from special types provided by JDBC Interop, the following well-known type
 # DB API
 
 ## Scopes 
-exec methods can be called directly from the `DB` instance. Alternatively "scopes" session and transaction can be created. 
+`exec` methods can be called directly from the `DB` instance. Alternatively "scopes" session and transaction can be created. 
 
 ### withSession
 Reuses the same database connection for each query. Handy if you wish to access the same temp tables from multiple queries
@@ -383,6 +385,13 @@ def sql[A : TypeTag, B : TypeTag](a: A, b: B) ... // arity-2 example
 
 For now methods are only synthesized up to arity-22. 22 was chosen as it is the max tuple size, though technically methods
 taking longer arguments lists could be added. 
+
+
+# Async?
+The `DB` API like JDBC is synchronous. It would be trivial create versions of the API's exec methods that return Futures.
+But in my opinion a true asynchronous database access framework requires async drivers and cannot easy be built atop JDBC. 
+At any rate, to be effective async APIs require architectural considerations beyond the scope of this project. 
+
 
 ## Proposed Features
 ### Relations Whitelist

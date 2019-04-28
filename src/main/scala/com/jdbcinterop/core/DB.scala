@@ -1,15 +1,31 @@
 package com.jdbcinterop.core
 
 import java.sql.{Connection, PreparedStatement, ResultSet, Types}
+
 import org.postgresql.util.PGobject
 import play.api.libs.json.{JsValue, Json}
-
 import com.jdbcinterop.core.DBFlavor._
+
+import scala.util.Try
 
 
 trait PSWrapper {
   val preparedStatement: PreparedStatement
   val flavor: DBFlavorTrait
+
+  private def execAndClose[R](op: PreparedStatement => R) = {
+    val res = op(preparedStatement)
+    preparedStatement.close()
+    res
+  }
+
+  def execute(): Boolean = execAndClose(_.execute())
+
+  def executeUpdate(): Int = execAndClose(_.executeUpdate())
+
+  def executeQuery(): RSWrapper = new RSWrapper {
+    override val resultSet: ResultSet = preparedStatement.executeQuery() // we must not close as caller needs to loop over results set
+  }
 
   def mkPGJson(json: String): PGobject = {
     var po = new PGobject()
@@ -77,23 +93,33 @@ trait ConnectionProvider {
 
 
 trait ExecScope extends ConnectionProvider {
-  protected val isTransaction: Boolean
-  protected val isSession: Boolean
+  protected val depth: Int
 
   def withSession[R](op: (Session) => R): R = withConnection(conn=>{
     val self = this
-    op(new Session {
+    val res = op(new Session {
+      override val depth: Int = self.depth + 1
       override val flavor: DBFlavorTrait = self.flavor
-      override def withConnection[R1](op: (Connection) => R1): R1 = op(conn)
+      override def withConnection[R1](op: (Connection) => R1): R1 = {
+        val res = op(conn)
+        conn.commit()
+        res
+      }
     })
+
+    res
   })
 
   def withTransaction[R](op: Transaction => R): R = withConnection(conn=>{
     val self = this
-    op(new Transaction {
+    val res = op(new Transaction {
+      override val depth: Int = self.depth + 1
       override val flavor: DBFlavorTrait = self.flavor
       override def withConnection[R1](op: (Connection) => R1): R1 = op(conn)
     })
+
+    conn.commit()
+    res
   })
 
   protected def execAux[R](op: ConnWrapper => R): R = {
@@ -108,9 +134,12 @@ trait ExecScope extends ConnectionProvider {
       var res: Option[R] = None
       try {
         res = Some(op(cw))
-        if (!isTransaction) cw.conn.commit()
-      } finally {
-        if (!isTransaction && !isSession) cw.conn.close()
+        if (depth == 0) {
+          cw.conn.commit()
+          cw.conn.close()
+        }
+      } catch {
+        case t: Throwable => Try(cw.conn.close()); throw t
       }
 
       res.get
@@ -118,32 +147,28 @@ trait ExecScope extends ConnectionProvider {
   }
 
   def raw(sql: String): Boolean = {
-    execAux(conn=>{
-      conn.conn.prepareStatement(sql).execute()
-    })
+    exec(QueryBuilder.empty.addLiteral(sql).mkStatement)
   }
 
-  def exec(op: MkStatement): Boolean = execAux(c=>op(c).map(_.preparedStatement.execute())).headOption.getOrElse(false)
+  def exec(op: MkStatement): Boolean = execAux(c=>op(c).map(_.execute())).headOption.getOrElse(false)
 
   def execUpdate(update: MkStatement): Long = execUpdates(Seq(update))
 
   def execUpdates(updates: Iterable[MkStatement]): Long = {
     execAux[Long](conn=>{
-      updates.flatMap(u=>u(conn).map(_.preparedStatement.executeUpdate())).sum
+      updates.flatMap(u=>u(conn).map(_.executeUpdate())).sum
     })
   }
 
-  def execQuery[T](query: MkStatement)(each: RSWrapper => T): Iterable[T] = {
-    execAux[Iterable[T]](conn=>{
+  def execQuery[R](query: MkStatement)(each: RSWrapper => R): Seq[R] = {
+    execAux[Seq[R]](conn=>{
       query(conn).flatMap(psw=>{
-        val rs = psw.preparedStatement.executeQuery()
-        val res = scala.collection.mutable.ListBuffer.empty[T]
-        val rsw = new RSWrapper {
-          override val resultSet: ResultSet = rs
-        }
-        while (rs.next()) {
+        val rsw = psw.executeQuery()
+        val res = scala.collection.mutable.ListBuffer.empty[R]
+        while (rsw.resultSet.next()) {
           res += each(rsw)
         }
+        psw.preparedStatement.close()
         res
       })
     })
@@ -152,18 +177,12 @@ trait ExecScope extends ConnectionProvider {
 
 
 trait Session extends ExecScope {
-  protected val isTransaction: Boolean = false
-  protected val isSession: Boolean = true
-
   override def withSession[R](op: (Session) => R): R
     = throw new IllegalAccessError("Recursive session scopes not allowed")
 }
 
 
 trait Transaction extends ExecScope {
-  protected val isTransaction: Boolean = true
-  protected val isSession: Boolean = true
-
   override def withTransaction[R](op: (Transaction) => R): R
     = throw new IllegalAccessError("Recursive transaction scopes not allowed")
 
@@ -174,7 +193,17 @@ trait Transaction extends ExecScope {
 
 object DB {}
 
+/* Notes On PreparedStatement and Connection Management:
+* - Close prepared statements once no longer needed
+*   + PreparedStatement must be closed before a new one created
+* - Close connections:
+*   + after session callback completes
+*   + after `execAux` callback completes when at depth 0
+*
+* - PSWrapper closes automatically for all but `executeQuery`. For `executeQuery` prepared statement
+*   must stay open until caller done with ResultSet.
+*
+* */
 trait DB extends ExecScope {
-  protected val isTransaction: Boolean = false
-  protected val isSession: Boolean = false
+  override val depth: Int = 0
 }
