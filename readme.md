@@ -9,6 +9,7 @@ This library is not stable nor thoroughly tested. Do not use in production.
 ```scala
 import com.jdbcinterop.db.{DB, DBFlavor}
 import com.jdbcinterop.dsl._
+import com.jdbcinterop.dsl.interpolation._
 
 val db = new DB {
   override val flavor: DBFlavorTrait = DBFlavor.H2

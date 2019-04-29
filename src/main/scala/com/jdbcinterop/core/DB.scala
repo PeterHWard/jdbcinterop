@@ -13,6 +13,7 @@ trait PSWrapper {
   val preparedStatement: PreparedStatement
   val flavor: DBFlavorTrait
 
+  // FIXME: use closeOnCompletion()
   private def execAndClose[R](op: PreparedStatement => R) = {
     val res = op(preparedStatement)
     preparedStatement.close()
